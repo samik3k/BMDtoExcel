@@ -12,107 +12,291 @@ using Excel = Microsoft.Office.Interop.Excel;
 
 namespace Bmd_To_Excel_project
 {
-    public partial class Form1 : Form
-    {
-        public Form1()
-        {
-            InitializeComponent();
-        }
+	public partial class Form1 : Form
+	{
+		public Form1()
+		{
+			InitializeComponent();
+		}
 
-        private Excel.Application excelapp;
-		private Excel.Window excelWindow; 
-		
+		// окно excel
+		private Excel.Application excelapp;
+
+		// листы и рабочий лист excel
 		private Excel.Sheets excelsheets;
 		private Excel.Worksheet excelworksheet;
 
+		// выделенные ячейки для работы excel
 		private Excel.Range excelcells;
-				
-		Stream BmdFile; 
 
-		const int ITEM_LINE_SIZE = 84;
+		// потоковый файл BMD
+		Stream BmdFile;
 
+		const int ITEM_MAX_LINE_SIZE = 84;	// максимальный размер строки item.bmd
+		const int ITEM_MAX_IN_TYPE = 512;	// максимальное количество вещей в одном типе item.bmd
+		const int ITEM_MAX_TYPES = 16;		// максимальное количество типов в item.bmd
+		// максимальный размер файла item.bmd - 688128
+		const int ITEM_TOTAL_LINE_SIZE = ITEM_MAX_IN_TYPE * ITEM_MAX_TYPES * ITEM_MAX_LINE_SIZE;
+
+		// структура для файла item.bmd
 		unsafe public struct ItemEx
 		{
 			public string ItemName;
 			public fixed Int64 Numbers[54];
 		};
+		public ItemEx[,] Items = new ItemEx[16, 512];
 
-		public ItemEx[,] Items = new ItemEx[16,512];
-
+		// загрузка потока файла BMD в структуру
 		unsafe private bool LoadItemBmd(Stream File)
-        {
-			const int ITEM_TOTAL_LINE_SIZE = 512 * 16 * 84; //688128
-			
-			byte[] lpDstBuf = new byte[ITEM_TOTAL_LINE_SIZE];						
-			byte[] XorKeys = new byte[3] { 0xFC, 0xCF, 0xAB };
+		{
+			byte[] lpDstBuf = new byte[ITEM_TOTAL_LINE_SIZE];	// массив для файла после декриптования
+			byte[] XorKeys = new byte[3] { 0xFC, 0xCF, 0xAB };	// ключи для декриптования
 
-			for (int i = 0; i < ITEM_TOTAL_LINE_SIZE; i++)
-			{
-				lpDstBuf[i] = 0;
-			}
+			// обнуление, надо ли ?
+			//for (int i = 0; i < ITEM_TOTAL_LINE_SIZE; i++)
+			//	lpDstBuf[i] = 0;
+
+			// считывание потока в массив
 			File.Read(lpDstBuf, 0, ITEM_TOTAL_LINE_SIZE);
 
-			// decription
+			// декриптование
 			for (int i = 0; i < ITEM_TOTAL_LINE_SIZE; i++)
-			{
 				lpDstBuf[i] ^= XorKeys[i % 3];
-			}
 
-			for (int i = 0; i < 16; i++)
+			// цикл по всем типам
+			for (int i = 0; i < ITEM_MAX_TYPES; i++)
 			{
-				for (int j = 0; j < 512; j++)
+				// цикл по всем вещам в типе
+				for (int j = 0; j < ITEM_MAX_IN_TYPE; j++)
 				{
-					int start = (i * 512 + j)*84;
+					int start = (i * ITEM_MAX_IN_TYPE + j) * ITEM_MAX_LINE_SIZE;	// позиция строки в массиве
+					// считываем название вещи (первые 30 символов строки)
 					Items[i, j].ItemName = System.Text.Encoding.Default.GetString(lpDstBuf, start, 30);
+					start += 30;	// перемещаем позицию на 30
+
+					// фиксируем переменную структуры в буфер для изменения
 					fixed (Int64* buff2 = Items[i, j].Numbers)
 					{
-						int TempX = 0;
+						int TempX = 0;	// позиция в строке массива
+
 						for (int k = 0; k < MyItemColumns.Length; k++)
 						{
-							Int64* buff = buff2 + k;
-							
+							// цикл по ячейкам в структуре буфера
+							Int64* buff = buff2 + k;		// переменная в строке буфера
+							int TempPos = start + TempX;	// позиция в массиве item.bmd
+
+							// проверяем тип хранящейся переменной и копируем из массива item.bmd в буфер
 							if (MyItemColumns[k].TypeSize == 1)
 							{
-								if (MyItemColumns[k].Signed == 1)
-									*buff = (sbyte)lpDstBuf[start + 30 + TempX];
+								if (MyItemColumns[k].Signed)
+									*buff = (sbyte)lpDstBuf[TempPos];
 								else
-									*buff = (byte)lpDstBuf[start + 30 + TempX];
+									*buff = (byte)lpDstBuf[TempPos];
 							}
 							else if (MyItemColumns[k].TypeSize == 2)
 							{
-								if (MyItemColumns[k].Signed == 1)
-									*buff = BitConverter.ToInt16(lpDstBuf, start + 30 + TempX);
+								if (MyItemColumns[k].Signed)
+									*buff = BitConverter.ToInt16(lpDstBuf, TempPos);
 								else
-									*buff = BitConverter.ToUInt16(lpDstBuf, start + 30 + TempX);
+									*buff = BitConverter.ToUInt16(lpDstBuf, TempPos);
 							}
 							else if (MyItemColumns[k].TypeSize == 4)
 							{
-								if (MyItemColumns[k].Signed == 1)
-									*buff = BitConverter.ToInt32(lpDstBuf, start + 30 + TempX);
+								if (MyItemColumns[k].Signed)
+									*buff = BitConverter.ToInt32(lpDstBuf, TempPos);
 								else
-									*buff = BitConverter.ToUInt32(lpDstBuf, start + 30 + TempX);
+									*buff = BitConverter.ToUInt32(lpDstBuf, TempPos);
 							}
+							// увеличиваем позицию в массиве item.bmd на размер переменной
 							TempX += MyItemColumns[k].TypeSize;
 						}
 					}
 				}
 			}
 			return true;
-        }
+		}
 
-        private bool LoadExcel()
-        {
+		// сохранение структуры в item.bmd
+		unsafe private void SaveItemBmd()
+		{
+			if (saveFileDialog1.ShowDialog() == DialogResult.OK)
+			{
+				// подгатавливаем буфер для структуры вещей
+				byte[] lpDstBuf = new byte[ITEM_TOTAL_LINE_SIZE + 4];
+				byte[] XorKeys = new byte[3] { 0xFC, 0xCF, 0xAB };	// ключи для криптования
+
+				// цикл по всем типам
+				for (int i = 0; i < ITEM_MAX_TYPES; i++)
+				{
+					// цикл по всем вещам в типе
+					for (int j = 0; j < ITEM_MAX_IN_TYPE; j++)
+					{
+						int start = (i * ITEM_MAX_IN_TYPE + j) * ITEM_MAX_LINE_SIZE;	// позиция строки в массиве
+
+						// запись названия вещи (первые 30 символов строки)
+						Array.Copy(System.Text.Encoding.Default.GetBytes(Items[i, j].ItemName), 0, lpDstBuf, start, Items[i, j].ItemName.Length);
+
+						start += 30;	// перемещаем позицию на 30
+
+						// фиксируем переменную структуры в буфер для изменения
+						fixed (Int64* buff2 = Items[i, j].Numbers)
+						{
+							int TempX = 0;	// позиция в строке массива
+
+							for (int k = 0; k < MyItemColumns.Length; k++)
+							{
+								// цикл по ячейкам в структуре буфера
+								Int64* buff = buff2 + k;		// переменная в строке буфера
+								int TempPos = start + TempX;	// позиция в массиве item.bmd
+
+								// проверяем тип хранящейся переменной и копируем из массива item.bmd в буфер
+								if (MyItemColumns[k].TypeSize == 1)
+								{
+									if (MyItemColumns[k].Signed)
+										Array.Copy(BitConverter.GetBytes(Convert.ToSByte(*buff)), 0, lpDstBuf, TempPos, 1);
+									else
+										Array.Copy(BitConverter.GetBytes(Convert.ToByte(*buff)), 0, lpDstBuf, TempPos, 1);
+								}
+								else if (MyItemColumns[k].TypeSize == 2)
+								{
+									if (MyItemColumns[k].Signed)
+										Array.Copy(BitConverter.GetBytes(Convert.ToInt16(*buff)), 0, lpDstBuf, TempPos, 2);
+									else
+										Array.Copy(BitConverter.GetBytes(Convert.ToUInt16(*buff)), 0, lpDstBuf, TempPos, 2);
+								}
+								else if (MyItemColumns[k].TypeSize == 4)
+								{
+									if (MyItemColumns[k].Signed)
+										Array.Copy(BitConverter.GetBytes(Convert.ToInt32(*buff)), 0, lpDstBuf, TempPos, 4);
+									else
+										Array.Copy(BitConverter.GetBytes(Convert.ToUInt32(*buff)), 0, lpDstBuf, TempPos, 4);
+								}
+								// увеличиваем позицию в массиве item.bmd на размер переменной
+								TempX += MyItemColumns[k].TypeSize;
+							}
+						}
+					}
+				}
+
+				// декриптование
+				for (int i = 0; i < ITEM_TOTAL_LINE_SIZE; i++)
+					lpDstBuf[i] ^= XorKeys[i % 3];
+
+				using (FileStream filestream = File.Create(saveFileDialog1.FileName, ITEM_TOTAL_LINE_SIZE + 4))
+				{
+					// считывание потока в массив
+					filestream.Write(lpDstBuf, 0, ITEM_TOTAL_LINE_SIZE);
+
+					// Key Item.bmd for checksum
+					filestream.Write(BitConverter.GetBytes(DecryptKey(lpDstBuf, ITEM_TOTAL_LINE_SIZE, 0xE2F1u)), 0, 4);
+				}
+			}
+		}
+
+
+		uint DecryptKey(byte[] pSrcBuf, int Size, uint Key)
+		{
+			/*	ITEM_ENG_BMD                       = $E2F1;
+				SKILL_ENG_BMD                      = $5A18;
+				ITEMSETTYPE_ENG_BMD                = $E5F1;
+				ITEMSETOPTION_ENG_BMD              = $A2F1;
+				FILTER_BMD                         = $3E7D;
+				MASTERSKILLTREEDATA_BMD            = $2BC1;
+				MASTERSKILLTREETOOLTIPDATA_ENG_BMD = $2BC1;
+				FILTERNAME_BMD                     = $2BC1;
+				ITEMTOOLTIP_BMD                    = $E2F1;
+				ITEMLEVELTOOLTIP_BMD               = $E2F1;
+				ITEMLEVELTOOLTIPTEXT_BMD           = $E2F1;
+
+				FILTER_BMD_BLOCK                   = $14;*/
+
+			uint DecryptedKey = Key << 9;
+			int e = 1;
+			uint result = (((DecryptedKey + BitConverter.ToUInt32(pSrcBuf, 0)) + Key) >> e) ^ (DecryptedKey + BitConverter.ToUInt32(pSrcBuf, 0));
+
+			for (int i = 0; i < Size; )
+			{
+				if (i > 0)
+					result = ((result + Key) >> e) ^ result;
+
+				i += 4;
+				result = result ^ BitConverter.ToUInt32(pSrcBuf, i);
+				i += 4;
+				result = result + BitConverter.ToUInt32(pSrcBuf, i);
+				i += 4;
+				result = result ^ BitConverter.ToUInt32(pSrcBuf, i);
+				i += 4;
+				result = result + BitConverter.ToUInt32(pSrcBuf, i);
+
+				if (e == 1)
+					e = 5;
+				else
+					e = 1;
+			}
+			return result;
+		}
+
+		// загрузка exl файла
+		unsafe private bool LoadExcel(string FileName)
+		{
+			// открываем документ, надеемся что он структурирован этим же конвертором xD
+			excelapp = new Excel.Application();
+			//excelapp.Visible = true;
+			Excel.Workbook excelappworkbook = excelapp.Workbooks.Open(FileName, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing,
+																		Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing);
+
+			// получаем страницы книги
+			excelsheets = excelappworkbook.Worksheets;
+
+			// сворачиваем для увеличения скорости
+			excelsheets.Application.WindowState = Excel.XlWindowState.xlMinimized;
+			excelsheets.Application.Visible = false;
+
+			for (int i = 0; i < ITEM_MAX_TYPES; i++)
+			{
+				// поехали по страницам книги
+				excelworksheet = (Excel.Worksheet)excelsheets.get_Item(i + 1);
+				excelworksheet.Activate();
+
+				progressBar3.Value = i;
+				for (int j = 0; j < ITEM_MAX_IN_TYPE; j++)
+				{
+					// поехали по строкам
+					progressBar2.Value = j;
+
+					// считываем имя
+					excelcells = (Excel.Range)excelworksheet.Cells[j + 3, 3];
+					Items[i, j].ItemName = Convert.ToString(excelcells.Value2);
+
+					// считываем остальные ячейки
+					fixed (Int64* buff2 = Items[i, j].Numbers)
+					{
+						excelcells = excelworksheet.get_Range(ColumnTempName[3] + Convert.ToString(j + 3), ColumnTempName[3 + MyItemColumns.Length - 1] + Convert.ToString(j + 3));
+						System.Array SomeNumbers = excelcells.Value2 as System.Array;
+
+						int k = 0;
+						foreach (Object Number in SomeNumbers)
+						{
+							Int64* buff = buff2 + k;
+							*buff = Convert.ToInt64(Number);
+							k++;
+						}
+					}
+				}
+			}
+			excelapp.Quit();
 			return true;
-        }
+		}
 
+		// структура ячейки
 		public struct ExcColumn
 		{
-			String name;
-			String colSize;
-			int width;
-			int typeSize;
-			int signed;
-			public ExcColumn(String N, String C, int W, int T, int S)
+			String name;	// имя, записываемое заголовком
+			String colSize;	// размер хранения, записываемый заголовком
+			int width;		// ширина ячейки (в excel)
+			int typeSize;	// размер переменной в байтах
+			bool signed;	// переменная со знаком или без
+			public ExcColumn(String N, String C, int W, int T, bool S)
 			{
 				name = N;
 				colSize = C;
@@ -124,70 +308,74 @@ namespace Bmd_To_Excel_project
 			public string ColSize { get { return colSize; } }
 			public int Width { get { return width; } }
 			public int TypeSize { get { return typeSize; } }
-			public int Signed { get { return signed; } }
-
+			public bool Signed { get { return signed; } }
 		}
+
+		// структура ячеек Item.bmd в Excel
 		ExcColumn[] MyItemColumns = new ExcColumn[]{
-			new ExcColumn("Two hnd",	"0/65535",	8, 2, 0),
-			new ExcColumn("Item lvl",	"0/65535",	8, 2, 0),
-			new ExcColumn("Item slot",	"-128/127", 8, 1, 1),
-			new ExcColumn("Temp",		"?/?",		8, 1, 1),
-			new ExcColumn("Skill num",	"0/65535",	8, 2, 0),
-			new ExcColumn("Width",		"0/255",	6, 1, 0),
-			new ExcColumn("Height",		"0/255",	6, 1, 0),
-			new ExcColumn("< dmg",		"0/255",	6, 1, 0),
-			new ExcColumn("> dmg",		"0/255",	6, 1, 0),
-			new ExcColumn("Def rate",	"0/255",	7, 1, 0),
-			new ExcColumn("Defence",	"0/255",	7, 1, 0),
-			new ExcColumn("Magic def",	"0/255",	8, 1, 0),
-			new ExcColumn("Speed",		"0/255",	6, 1, 0),
-			new ExcColumn("Walk spd",	"0/255",	8, 1, 0),
-			new ExcColumn("Durab",		"0/255",	6, 1, 0),
-			new ExcColumn("Mag dur",	"0/255",	7, 1, 0),
-			new ExcColumn("Mag pow",	"0/255",	8, 1, 0),
-			new ExcColumn("Strength",	"0/65535",	8, 2, 0),
-			new ExcColumn("Agility",	"0/65535",	8, 2, 0),
-			new ExcColumn("Energy",		"0/65535",	8, 2, 0),
-			new ExcColumn("Vitality",	"0/65535",	8, 2, 0),
-			new ExcColumn("Command",	"0/65535",	8, 2, 0),
-			new ExcColumn("Req lvl",	"0/65535",	8, 2, 0),
-			new ExcColumn("Value",		"0/65535",	8, 2, 0),
-			new ExcColumn("Zen", "0/4 294 967 295",	14, 4, 0),
-			new ExcColumn("Type",		"0/255",	5, 1, 0),
-			new ExcColumn("DW",			"0/3",		5, 1, 0),
-			new ExcColumn("DK",			"0/3",		5, 1, 0),
-			new ExcColumn("Elf",		"0/3",		5, 1, 0),
-			new ExcColumn("MG",			"0/3",		5, 1, 0),
-			new ExcColumn("DL",			"0/3",		5, 1, 0),
-			new ExcColumn("SU",			"0/3",		5, 1, 0),
-			new ExcColumn("RF",			"0/3",		5, 1, 0),
-			new ExcColumn("Ice res",	"0/255",	8, 1, 0),
-			new ExcColumn("Poise res",	"0/255",	8, 1, 0),
-			new ExcColumn("Light res",	"0/255",	8, 1, 0),
-			new ExcColumn("Fire res",	"0/255",	8, 1, 0),
-			new ExcColumn("Earth res",	"0/255",	8, 1, 0),
-			new ExcColumn("Wind res",	"0/255",	8, 1, 0),
-			new ExcColumn("Water res",	"0/255",	8, 1, 0),
-			new ExcColumn("Unk",		"0/255",	8, 1, 0)
+			new ExcColumn("Two hnd",	"0/65535",	8, 2, false),
+			new ExcColumn("Item lvl",	"0/65535",	8, 2, false),
+			new ExcColumn("Item slot",	"-128/127", 8, 1, true),
+			new ExcColumn("Temp",		"?/?",		8, 1, true),
+			new ExcColumn("Skill num",	"0/65535",	8, 2, false),
+			new ExcColumn("Width",		"0/255",	6, 1, false),
+			new ExcColumn("Height",		"0/255",	6, 1, false),
+			new ExcColumn("< dmg",		"0/255",	6, 1, false),
+			new ExcColumn("> dmg",		"0/255",	6, 1, false),
+			new ExcColumn("Def rate",	"0/255",	7, 1, false),
+			new ExcColumn("Defence",	"0/255",	7, 1, false),
+			new ExcColumn("Magic def",	"0/255",	8, 1, false),
+			new ExcColumn("Speed",		"0/255",	6, 1, false),
+			new ExcColumn("Walk spd",	"0/255",	8, 1, false),
+			new ExcColumn("Durab",		"0/255",	6, 1, false),
+			new ExcColumn("Mag dur",	"0/255",	7, 1, false),
+			new ExcColumn("Mag pow",	"0/255",	8, 1, false),
+			new ExcColumn("Strength",	"0/65535",	8, 2, false),
+			new ExcColumn("Agility",	"0/65535",	8, 2, false),
+			new ExcColumn("Energy",		"0/65535",	8, 2, false),
+			new ExcColumn("Vitality",	"0/65535",	8, 2, false),
+			new ExcColumn("Command",	"0/65535",	8, 2, false),
+			new ExcColumn("Req lvl",	"0/65535",	8, 2, false),
+			new ExcColumn("Value",		"0/65535",	8, 2, false),
+			new ExcColumn("Zen", "0/4 294 967 295",	14, 4, false),
+			new ExcColumn("Type",		"0/255",	5, 1, false),
+			new ExcColumn("DW",			"0/3",		5, 1, false),
+			new ExcColumn("DK",			"0/3",		5, 1, false),
+			new ExcColumn("Elf",		"0/3",		5, 1, false),
+			new ExcColumn("MG",			"0/3",		5, 1, false),
+			new ExcColumn("DL",			"0/3",		5, 1, false),
+			new ExcColumn("SU",			"0/3",		5, 1, false),
+			new ExcColumn("RF",			"0/3",		5, 1, false),
+			new ExcColumn("Ice res",	"0/255",	8, 1, false),
+			new ExcColumn("Poise res",	"0/255",	8, 1, false),
+			new ExcColumn("Light res",	"0/255",	8, 1, false),
+			new ExcColumn("Fire res",	"0/255",	8, 1, false),
+			new ExcColumn("Earth res",	"0/255",	8, 1, false),
+			new ExcColumn("Wind res",	"0/255",	8, 1, false),
+			new ExcColumn("Water res",	"0/255",	8, 1, false),
+			new ExcColumn("Unk",		"0/255",	8, 1, false)
 		};
 
+		// название колонок в Excel
 		public String[] ColumnTempName = new String[] {"A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z",
 														"AA","AB","AC","AD","AE","AF","AG","AH","AI","AJ","AK","AL","AM","AN","AO","AP","AQ","AR","AS","AT","AU","AV","AW","AX","AY","AZ",
 														"BA","BB","BC","BD","BE","BF","BG","BH","BI","BJ","BK","BL","BM","BN","BO","BP","BQ","BR","BS","BT","BU","BV","BW","BX","BY","BZ"};
 
+		// заполнение массива Item.bmd d Excel 
 		unsafe private void CreateExcelItem()
 		{
 			// Создаем документ с 16 страницами
-            excelapp = new Excel.Application(); 
-            //excelapp.Visible=true;
+			excelapp = new Excel.Application();
+			//excelapp.Visible=true;
 
-            excelapp.SheetsInNewWorkbook=1;
-            Excel.Workbook excelappworkbook = excelapp.Workbooks.Add(Type.Missing);
+			excelapp.SheetsInNewWorkbook = 1;
+			Excel.Workbook excelappworkbook = excelapp.Workbooks.Add(Type.Missing);
 
-			String[] SheetsName = new String[16] { "Sword", "Axe", "MaceScepter", "Spear", "BowCrossbow", "Staff", "Shield", "Helm", "Armor", "Pants", "Gloves", "Boots", "Accessories", "Misc1", "Misc2", "Scrolls" };
+			String[] SheetsName = new String[] { "Sword", "Axe", "MaceScepter", "Spear", "BowCrossbow", "Staff", "Shield", "Helm", "Armor", "Pants", "Gloves", "Boots", "Accessories", "Misc1", "Misc2", "Scrolls" };
 
+			// получаем страницы книги
 			excelsheets = excelappworkbook.Worksheets;
-			
+
 			// определяем имена страницам и переходим на страницу
 			excelworksheet = (Excel.Worksheet)excelsheets.get_Item(0 + 1);
 			excelworksheet.Name = SheetsName[0];
@@ -195,7 +383,7 @@ namespace Bmd_To_Excel_project
 			excelworksheet.Application.ActiveWindow.SplitColumn = 3;
 			excelworksheet.Application.ActiveWindow.SplitRow = 2;
 			excelworksheet.Application.ActiveWindow.FreezePanes = true;
-			
+
 			// заполнение Index (0.1.2.3...)
 			excelcells = excelworksheet.get_Range("B3", Type.Missing);
 			excelcells.Value2 = 0;
@@ -266,7 +454,7 @@ namespace Bmd_To_Excel_project
 			excelcells.NumberFormat = "# ##0";
 
 			// копируем листы
-			for (int i = 0; i < 15; i++)
+			for (int i = 0; i < ITEM_MAX_TYPES - 1; i++)
 			{
 				excelworksheet = (Excel.Worksheet)excelsheets.get_Item(i + 1);
 				excelworksheet.Copy(Type.Missing, excelworksheet);
@@ -275,26 +463,31 @@ namespace Bmd_To_Excel_project
 			}
 
 			// заполняем ячейки
-			for (int i = 0; i < 16; i++)
+			for (int i = 0; i < ITEM_MAX_TYPES; i++)
 			{
 				// выделяем нужный лист
 				excelworksheet = (Excel.Worksheet)excelsheets.get_Item(i + 1);
 				excelworksheet.Activate();
 
+				// заполняем тип вещей
 				excelcells = excelworksheet.get_Range("A3", "A514");
 				excelcells.Value2 = i;
 
 				progressBar3.Value = i;
 				// поехали по строкам
-				for (int j = 0; j < 512; j++)
+				for (int j = 0; j < ITEM_MAX_IN_TYPE; j++)
 				{
 					progressBar2.Value = j;
-					if (Items[i,j].ItemName[0] != '\0')
+
+					// заполняем имя
+					if (Items[i, j].ItemName[0] != '\0')
 					{
 						excelcells = (Excel.Range)excelworksheet.Cells[j + 3, 3];
 						excelcells.Value2 = Items[i, j].ItemName;
 						excelcells.Select();
 					}
+
+					// заполняем остальные ячейки
 					fixed (Int64* buff = Items[i, j].Numbers)
 					{
 						for (int k = 0; k < MyItemColumns.Length; k++)
@@ -311,12 +504,17 @@ namespace Bmd_To_Excel_project
 
 			// показываем готовый файл
 			excelapp.Visible = true;
+
+			// перепрыгиваем на 1 лист
+			excelworksheet = (Excel.Worksheet)excelsheets.get_Item(0 + 1);
+			excelworksheet.Activate();
+
 			progressBar2.Value = 0;
 			progressBar3.Value = 0;
 			MessageBox.Show("All Done!");
 		}
-		
-        private void button4_Click(object sender, EventArgs e)
+
+		private void button4_Click(object sender, EventArgs e)
 		{
 			if (openFileDialog1.ShowDialog() == DialogResult.OK)
 			{
@@ -333,19 +531,29 @@ namespace Bmd_To_Excel_project
 				}
 				else if (openFileDialog1.FileName.EndsWith(".xls"))
 				{
+					string FileName = openFileDialog1.FileName;
+					if (LoadExcel(FileName))
+						SaveItemBmd();
+					else
+						MessageBox.Show("File loading error");
 					//xls load
 				}
 				else if (openFileDialog1.FileName.EndsWith(".xlsx"))
 				{
+					string FileName = openFileDialog1.FileName;
+					if (LoadExcel(FileName))
+						SaveItemBmd();
+					else
+						MessageBox.Show("File loading error");
 					//xlsx load
 				}
 			}
-        }
+		}
 
-        private void button4_DragEnter(object sender, DragEventArgs e)
-        {
+		private void button4_DragEnter(object sender, DragEventArgs e)
+		{
 			button4.Text = "Drop file here!";
-			button4.FlatStyle = FlatStyle.Flat; 
+			button4.FlatStyle = FlatStyle.Flat;
 			if (e.Data.GetDataPresent(DataFormats.FileDrop))
 			{
 				e.Effect = DragDropEffects.Move | DragDropEffects.Copy | DragDropEffects.Scroll;
@@ -354,23 +562,47 @@ namespace Bmd_To_Excel_project
 			{
 				e.Effect = DragDropEffects.None;
 			}
-        }
+		}
 
-        private void button4_DragLeave(object sender, EventArgs e)
-        {
+		private void button4_DragLeave(object sender, EventArgs e)
+		{
 			button4.Text = "Load file";
 			button4.FlatStyle = FlatStyle.Standard;
-        }
+		}
 
-		
+
 		private void button4_DragDrop(object sender, DragEventArgs e)
 		{
 			button4.Text = "Load file";
 			button4.FlatStyle = FlatStyle.Standard;
 
-		    string text = (string)e.Data.GetData("Text");
+			string[] files = (string[])e.Data.GetData(DataFormats.FileDrop);
 
-            //richTextBox1.LoadFile(text, RichTextBoxStreamType.RichText);
+			foreach (string file in files)
+			{
+				if (!File.Exists(file))
+					continue;
+
+
+				if (file.EndsWith(".bmd"))
+				{
+					FileStream stream1 = File.Open(file, FileMode.Open);
+					if (LoadItemBmd(stream1))
+						CreateExcelItem();
+					else
+						MessageBox.Show("File loading error");
+
+					stream1.Close();
+				}
+				else if (file.EndsWith(".xls"))
+				{
+					//xls load
+				}
+				else if (file.EndsWith(".xlsx"))
+				{
+					//xlsx load
+				}
+			}
 		}
-    }
+	}
 }
